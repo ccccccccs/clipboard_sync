@@ -28,11 +28,17 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "clips.db"
-TEMPLATE_DIR = BASE_DIR / "templates"
-TOKEN_FILE = BASE_DIR / "token.txt"
-PORT_FILE = BASE_DIR / "port.txt"
+# PyInstaller: writable files go next to the exe, templates are bundled inside _MEIPASS
+if getattr(sys, "frozen", False):
+    DATA_DIR = Path(sys.executable).parent
+    TEMPLATE_DIR = Path(sys._MEIPASS) / "templates"
+else:
+    DATA_DIR = Path(__file__).parent
+    TEMPLATE_DIR = DATA_DIR / "templates"
+
+DB_PATH = DATA_DIR / "clips.db"
+TOKEN_FILE = DATA_DIR / "token.txt"
+PORT_FILE = DATA_DIR / "port.txt"
 MAX_CLIPS = int(os.environ.get("CLIPBOARD_MAX_CLIPS", 1000))
 
 def _load_port():
