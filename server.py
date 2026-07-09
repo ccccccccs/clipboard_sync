@@ -28,19 +28,21 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-if getattr(sys, 'frozen', False):
-    APP_DIR = Path(sys.executable).parent
-    BUNDLE_DIR = Path(sys._MEIPASS)
-else:
-    APP_DIR = Path(__file__).parent
-    BUNDLE_DIR = APP_DIR
-
-BASE_DIR = APP_DIR
-DB_PATH = APP_DIR / "clips.db"
-TEMPLATE_DIR = BUNDLE_DIR / "templates"
-TOKEN_FILE = APP_DIR / "token.txt"
-PORT = int(os.environ.get("CLIPBOARD_PORT", 5000))
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "clips.db"
+TEMPLATE_DIR = BASE_DIR / "templates"
+TOKEN_FILE = BASE_DIR / "token.txt"
+PORT_FILE = BASE_DIR / "port.txt"
 MAX_CLIPS = int(os.environ.get("CLIPBOARD_MAX_CLIPS", 1000))
+
+def _load_port():
+    """Load port: env var > port.txt > default 5000."""
+    p = os.environ.get("CLIPBOARD_PORT")
+    if p:
+        return int(p)
+    if PORT_FILE.exists():
+        return int(PORT_FILE.read_text().strip())
+    return 5000
 
 def _load_token():
     """Load token: env var > token.txt > default password. Always persist."""
@@ -53,6 +55,7 @@ def _load_token():
     TOKEN_FILE.write_text(default)
     return default
 
+PORT = _load_port()
 TOKEN = _load_token()
 
 app = Flask(__name__, template_folder=str(TEMPLATE_DIR))
@@ -115,12 +118,6 @@ def sse_broadcast(event: str, data: dict):
 # ---------------------------------------------------------------------------
 _clip_lock = threading.Lock()
 _last_clip = ""
-
-def _update_last_clip(content: str):
-    """Call this after programmatic clipboard writes to suppress monitor dupes."""
-    with _clip_lock:
-        global _last_clip
-        _last_clip = content
 
 def _monitor():
     global _last_clip
@@ -199,12 +196,14 @@ def create_clip():
     ).fetchone()
     conn.close()
 
-    # Set local Windows clipboard (suppress monitor dupe)
-    _update_last_clip(content)
-    try:
-        pyperclip.copy(content)
-    except Exception:
-        pass
+    # Set local Windows clipboard (hold lock so monitor skips this write)
+    with _clip_lock:
+        global _last_clip
+        _last_clip = content
+        try:
+            pyperclip.copy(content)
+        except Exception:
+            pass
 
     sse_broadcast("new", dict(row))
     return jsonify(dict(row)), 201
@@ -335,6 +334,32 @@ def _run_gui():
                      command=lambda: root.attributes("-topmost", top_var.get()),
                      font=ctk.CTkFont(size=11)).pack(side="left")
 
+    # Port setting (requires restart)
+    port_inner = ctk.CTkFrame(settings_frame, fg_color="transparent")
+    port_inner.pack(fill="x", padx=10, pady=(0, 4))
+    ctk.CTkLabel(port_inner, text="\u7aef\u53e3:", font=ctk.CTkFont(size=11)).pack(side="left")
+    port_var = ctk.StringVar(value=str(PORT))
+    ctk.CTkEntry(port_inner, textvariable=port_var, width=60, font=ctk.CTkFont(size=11)).pack(side="left", padx=(6, 6))
+
+    def _save_port():
+        nonlocal _lan_url
+        try:
+            new_port = int(port_var.get().strip())
+            if new_port < 1 or new_port > 65535:
+                return
+            global PORT
+            PORT = new_port
+            PORT_FILE.write_text(str(new_port))
+            _lan_url = f"http://{local_ip}:{PORT}/{TOKEN}"
+            url_inner.configure(text="\U0001f517  " + _lan_url)
+        except ValueError:
+            pass
+
+    ctk.CTkButton(port_inner, text="\u4fee\u6539", width=50, height=24, font=ctk.CTkFont(size=10),
+                  command=_save_port).pack(side="left")
+    ctk.CTkLabel(port_inner, text="(\u9700\u91cd\u542f\u751f\u6548)", font=ctk.CTkFont(size=10),
+                 text_color="#888888").pack(side="left", padx=(6, 0))
+
     # Divider
     div = ctk.CTkFrame(main, height=2, fg_color="#404040")
     div.pack(fill="x", pady=10)
@@ -378,7 +403,7 @@ def _run_gui():
         _pending_refresh = root.after(delay, _refresh)
 
     def _popup_detail(clip):
-        """Double-click popup: full content with copy + delete."""
+        """Double-click popup: full read-only content view."""
         popup = ctk.CTkToplevel(root)
         popup.title(clip["ts"])
         popup.geometry("500x380")
@@ -391,32 +416,22 @@ def _run_gui():
                              fg_color="#0a0a0a", corner_radius=6)
         txt.insert("1.0", clip["content"])
         txt.configure(state="disabled")
-        txt.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        txt.pack(fill="both", expand=True, padx=12, pady=12)
 
-        bar = ctk.CTkFrame(popup, fg_color="transparent")
-        bar.pack(fill="x", padx=12, pady=(0, 10))
 
-        def _copy():
-            root.clipboard_clear()
-            root.clipboard_append(clip["content"])
+    _click1 = None
 
-        def _delete():
-            try:
-                conn = get_db()
-                conn.execute("DELETE FROM clips WHERE id = ?", (clip["id"],))
-                conn.commit()
-                conn.close()
-                popup.destroy()
-                _schedule_refresh(200)
-            except Exception:
-                pass
-
-        ctk.CTkButton(bar, text="\u590d\u5236", width=70, height=28, command=_copy,
-                      fg_color="#2a4a6a", corner_radius=4).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(bar, text="\u5220\u9664", width=70, height=28, command=_delete,
-                      fg_color="#4a2a2a", corner_radius=4).pack(side="right")
+    def _on_click(event):
+        nonlocal _click1
+        _click1 = (event.x, event.y)
 
     def _on_dbl_click(event):
+        nonlocal _click1
+        # ponytail: ignore double-clicks where the two clicks are far apart (accidental)
+        if _click1 and (abs(event.x - _click1[0]) > 10 or abs(event.y - _click1[1]) > 10):
+            _click1 = None
+            return
+        _click1 = None
         idx = clip_text.index(f"@{event.x},{event.y}")
         tags = clip_text.tag_names(idx)
         for tag in tags:
@@ -425,15 +440,45 @@ def _run_gui():
                 if 0 <= i < len(_clip_data):
                     clip = _clip_data[i]
                     if len(clip["content"]) <= 200:
-                        # short / already fully shown: select all
                         clip_text.tag_add("sel", "1.0", "end")
                         clip_text.focus_set()
                     else:
-                        # truncated: open popup with full content
                         _popup_detail(clip)
                 break
 
+    def _on_right_click(event):
+        idx = clip_text.index(f"@{event.x},{event.y}")
+        tags = clip_text.tag_names(idx)
+        for tag in tags:
+            if tag.startswith("r_"):
+                i = int(tag.split("_")[1])
+                if 0 <= i < len(_clip_data):
+                    _right_target = _clip_data[i]
+                    menu = tk.Menu(clip_text, tearoff=0, bd=0,
+                                   bg="#1a1a1a", fg="#cccccc",
+                                   activebackground="#2a4a6a", activeforeground="#ffffff",
+                                   font=("Segoe UI", 10))
+                    menu.add_command(label="\u590d\u5236",
+                                     command=lambda c=_right_target: (
+                                         root.clipboard_clear(), root.clipboard_append(c["content"])))
+                    menu.add_command(label="\u5220\u9664",
+                                     command=lambda c=_right_target: _do_delete_menu(c))
+                    menu.post(event.x_root, event.y_root)
+                break
+
+    def _do_delete_menu(clip):
+        try:
+            conn = get_db()
+            conn.execute("DELETE FROM clips WHERE id = ?", (clip["id"],))
+            conn.commit()
+            conn.close()
+            _schedule_refresh(200)
+        except Exception:
+            pass
+
+    clip_text.bind("<Button-1>", _on_click)
     clip_text.bind("<Double-1>", _on_dbl_click)
+    clip_text.bind("<Button-3>", _on_right_click)
 
     def _rebuild_text():
         clip_text.configure(state="normal")
