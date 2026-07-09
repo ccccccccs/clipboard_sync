@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+.venv/
+venv/
+env/
+
+# Secrets & data
+clips.db
+token.txt
+
+# Build output
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests / temp
+test_stdout.txt
+test_stderr.txt
+test.ico

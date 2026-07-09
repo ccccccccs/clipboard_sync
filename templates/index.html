@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clipboard Sync</title>
+<style>
+  :root { --bg: #0f0f0f; --card: #1a1a1a; --text: #e0e0e0; --muted: #888; --accent: #4da6ff; --danger: #e05555; --radius: 10px; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 16px; }
+  .container { max-width: 680px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+
+  /* input area */
+  .input-area { display: flex; gap: 8px; margin-bottom: 20px; }
+  .input-area textarea { flex: 1; background: var(--card); border: 1px solid #333; color: var(--text); border-radius: var(--radius); padding: 10px 14px; font-size: 0.95rem; resize: vertical; min-height: 44px; font-family: inherit; }
+  .input-area textarea:focus { outline: none; border-color: var(--accent); }
+  .input-area button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 0 20px; font-size: 0.9rem; cursor: pointer; white-space: nowrap; }
+  .input-area button:hover { opacity: 0.85; }
+
+  /* status */
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 0.8rem; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; flex-shrink: 0; }
+  .dot.off { background: #e05555; }
+
+  /* clip list */
+  .clip-list { display: flex; flex-direction: column; gap: 8px; }
+  .clip-card { background: var(--card); border-radius: var(--radius); padding: 12px 14px; display: flex; align-items: flex-start; gap: 10px; border: 1px solid #222; transition: border-color 0.2s; }
+  .clip-card.new-highlight { border-color: var(--accent); animation: flash 1.5s ease-out; }
+  @keyframes flash { 0% { background: #1a2a3a } 100% { background: var(--card) } }
+  .clip-content { flex: 1; word-break: break-all; white-space: pre-wrap; font-size: 0.9rem; line-height: 1.5; max-height: 200px; overflow-y: auto; }
+  .clip-meta { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+  .clip-expand { color: var(--accent); cursor: pointer; font-size: 0.78rem; user-select: none; margin-left: 2px; }
+  .clip-expand:hover { text-decoration: underline; }
+  .clip-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+  .clip-actions button { background: none; border: 1px solid #333; color: var(--text); border-radius: 6px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer; }
+  .clip-actions button:hover { background: #333; }
+  .clip-actions button.del:hover { border-color: var(--danger); color: var(--danger); }
+
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+  .search-wrap { margin-bottom: 12px; }
+  .search-wrap input { width: 100%; background: var(--card); border: 1px solid #333; color: var(--text); border-radius: var(--radius); padding: 8px 12px; font-size: 0.9rem; font-family: inherit; }
+  .search-wrap input:focus { outline: none; border-color: var(--accent); }
+  mark { background: #665c00; color: #fff; border-radius: 2px; }
+
+  @media (max-width: 480px) {
+    .input-area { flex-direction: column; }
+    .input-area button { padding: 10px; }
+  }
+  ::selection { background: #4da6ff; color: #fff; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📋 Clipboard Sync</h1>
+  <p class="sub">局域网剪贴板同步 · 实时更新</p>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="status-text">连接中...</span></div>
+
+  <div class="search-wrap"><input id="search" type="text" placeholder="搜索剪贴板内容..." /></div>
+
+  <div class="input-area">
+    <textarea id="input" rows="2" placeholder="输入内容并回车发送到服务器剪贴板..."></textarea>
+    <button id="send-btn">发送</button>
+  </div>
+
+  <div class="clip-list" id="list"></div>
+  <div class="empty" id="empty">暂无剪贴板记录</div>
+</div>
+
+<script>
+const TOKEN = "{{ token }}";
+const API = (path = "") => `/api/clips${path}?token=${TOKEN}`;
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const dot = $("#dot");
+const statusText = $("#status-text");
+const listEl = $("#list");
+const emptyEl = $("#empty");
+const inputEl = $("#input");
+const sendBtn = $("#send-btn");
+const searchEl = $("#search");
+
+let clips = [];
+let newIds = new Set();
+
+// --- Fetch & render ---
+async function loadClips() {
+  try {
+    const res = await fetch(API());
+    if (!res.ok) throw new Error(res.status);
+    clips = await res.json();
+    render();
+    if (clips.length === 0) statusText.textContent = "就绪 — 复制内容到 Windows 剪贴板试试";
+  } catch (e) {
+    statusText.textContent = "连接失败";
+    dot.classList.add("off");
+  }
+}
+
+function render(list) {
+  const q = searchEl.value.trim();
+  if (!list) list = q ? clips.filter(c => c.content.toLowerCase().includes(q.toLowerCase())) : clips;
+  if (list.length === 0) {
+    listEl.innerHTML = "";
+    listEl.style.display = "none";
+    emptyEl.style.display = "block";
+    if (q) emptyEl.textContent = `未找到包含 "${q}" 的条目`;
+    else emptyEl.textContent = "暂无剪贴板记录";
+    return;
+  }
+  listEl.style.display = "flex";
+  emptyEl.style.display = "none";
+
+  const MAX_PREVIEW = 200;
+  const hlText = (s) => q ? s.replace(new RegExp(esc(q).replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'gi'), '<mark>$&</mark>') : s;
+  listEl.innerHTML = list.map(c => {
+    const time = c.created_at ? new Date(c.created_at + "Z").toLocaleString("zh-CN") : "";
+    const hl = newIds.has(c.id) ? " new-highlight" : "";
+    const isLong = c.content.length > MAX_PREVIEW;
+    const fullHtml = hlText(esc(c.content));
+    const textHTML = isLong
+      ? `<span class="clip-text clip-text-preview">${hlText(esc(c.content.substring(0, MAX_PREVIEW)))}…</span>`
+       + `<span class="clip-text clip-text-full" style="display:none">${fullHtml}</span>`
+       + `<span class="clip-expand" onclick="toggleExpand(this)">▼ 展开</span>`
+      : `<span class="clip-text clip-text-preview">${fullHtml}</span>`;
+    return `<div class="clip-card${hl}" data-id="${c.id}">
+      <div class="clip-content">${textHTML}<div class="clip-meta">${time}</div></div>
+      <div class="clip-actions">
+        <button onclick="copyText(${c.id})">复制</button>
+        <button class="del" onclick="deleteClip(${c.id})">删除</button>
+      </div>
+    </div>`;
+  }).join("");
+
+  // Clear highlight after animation
+  setTimeout(() => { newIds.clear(); $$(".new-highlight").forEach(el => el.classList.remove("new-highlight")); }, 2000);
+}
+
+function esc(s) {
+  const el = document.createElement("div");
+  el.textContent = s;
+  return el.innerHTML;
+}
+
+// --- Actions ---
+function copyText(id) {
+  const clip = clips.find(c => c.id === id);
+  if (!clip) return;
+  copyToClipboard(clip.content);
+}
+function copyToClipboard(text) {
+  // Modern clipboard API (needs HTTPS/localhost), fallback for Safari/HTTP LAN
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      statusText.textContent = "已复制到本机剪贴板";
+      setTimeout(() => { statusText.textContent = "已连接"; }, 1500);
+    }).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); statusText.textContent = "已复制到本机剪贴板"; }
+  catch(e) { statusText.textContent = "复制失败，请长按选择复制"; }
+  document.body.removeChild(ta);
+  setTimeout(() => { statusText.textContent = "已连接"; }, 1500);
+}
+
+function toggleExpand(el) {
+  const card = el.closest(".clip-card");
+  const preview = card.querySelector(".clip-text-preview");
+  const full = card.querySelector(".clip-text-full");
+  if (full.style.display === "none") {
+    full.style.display = "";
+    preview.style.display = "none";
+    el.textContent = "▲ 收起";
+  } else {
+    full.style.display = "none";
+    preview.style.display = "";
+    el.textContent = "▼ 展开";
+  }
+}
+
+function selectText(el) {
+  if (!el) return;
+  // pick the visible text span only (ignore display:none siblings)
+  const full = el.querySelector(".clip-text-full");
+  const preview = el.querySelector(".clip-text-preview");
+  let target = el;
+  if (full && full.style.display !== "none") target = full;
+  else if (preview) target = preview;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(target);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+async function deleteClip(id) {
+  await fetch(API(`/${id}`), { method: "DELETE" });
+  clips = clips.filter(c => c.id !== id);
+  render();
+}
+
+async function sendClip() {
+  const content = inputEl.value.trim();
+  if (!content) return;
+  const res = await fetch(API(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content })
+  });
+  if (res.ok) {
+    inputEl.value = "";
+    // SSE will push the new clip
+  }
+}
+
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendClip(); }
+});
+sendBtn.addEventListener("click", sendClip);
+
+// --- SSE ---
+function connectSSE() {
+  const es = new EventSource(`/api/stream?token=${TOKEN}`);
+  es.addEventListener("new", (e) => {
+    const data = JSON.parse(e.data);
+    clips.unshift(data);
+    newIds.add(data.id);
+    render();
+  });
+  es.addEventListener("open", () => {
+    dot.classList.remove("off");
+    statusText.textContent = "已连接";
+  });
+  es.addEventListener("error", () => {
+    dot.classList.add("off");
+    statusText.textContent = "连接断开，重连中...";
+  });
+  return es;
+}
+
+// --- Init ---
+// delegated dblclick: select visible text on any clip card
+listEl.addEventListener("dblclick", (e) => {
+  const card = e.target.closest(".clip-card");
+  if (card) selectText(card.querySelector(".clip-content"));
+});
+// search
+searchEl.addEventListener("input", () => render());
+loadClips();
+let es = connectSSE();
+
+// Reconnect SSE on error (after 3s)
+setInterval(() => {
+  if (es.readyState === EventSource.CLOSED) {
+    es = connectSSE();
+  }
+}, 5000);
+</script>
+</body>
+</html>
